@@ -1,0 +1,212 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main, develop ]
+
+env:
+  GO_VERSION: '1.21'
+  DOCKER_BUILDKIT: 1
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      working-directory: ./application
+      run: go mod download
+
+    - name: Run go vet
+      working-directory: ./application
+      run: go vet ./...
+
+    - name: Run go fmt check
+      working-directory: ./application
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "Go code is not formatted:"
+          gofmt -s -l .
+          exit 1
+        fi
+
+    - name: Run unit tests
+      working-directory: ./application
+      env:
+        DB_HOST: localhost
+        DB_PORT: 5432
+        DB_NAME: testdb
+        DB_USER: postgres
+        DB_PASSWORD: postgres
+        DB_SSL_MODE: disable
+      run: |
+        go test -v -race -coverprofile=coverage.out ./...
+        go tool cover -html=coverage.out -o coverage.html
+
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: application/coverage.html
+
+    - name: Check test coverage
+      working-directory: ./application
+      run: |
+        COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+        echo "Test coverage: $COVERAGE%"
+        if (( $(echo "$COVERAGE < 70" | bc -l) )); then
+          echo "Test coverage is below 70%"
+          exit 1
+        fi
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run Gosec Security Scanner
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: '-fmt sarif -out gosec.sarif ./application/...'
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: gosec.sarif
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './application'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    if: github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ap-south-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.login-ecr.outputs.registry }}/go-microservice
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./application
+        file: ./application/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Scan Docker image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.login-ecr.outputs.registry }}/go-microservice:latest
+        format: 'sarif'
+        output: 'trivy-image-results.sarif'
+
+    - name: Upload Docker image scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-image-results.sarif'
+
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [test, security-scan, build]
+    if: always()
+    
+    steps:
+    - name: Notify Slack on Success
+      if: needs.test.result == 'success' && needs.security-scan.result == 'success'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#devops'
+        text: '✅ CI Pipeline passed for ${{ github.ref }}'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Notify Slack on Failure
+      if: needs.test.result == 'failure' || needs.security-scan.result == 'failure' || needs.build.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#devops'
+        text: '❌ CI Pipeline failed for ${{ github.ref }}'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

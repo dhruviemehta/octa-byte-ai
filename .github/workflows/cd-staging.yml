@@ -1,0 +1,162 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [ main ]
+  workflow_run:
+    workflows: ["Continuous Integration"]
+    types:
+      - completed
+    branches: [ main ]
+
+env:
+  AWS_REGION: ap-south-1
+  ENVIRONMENT: staging
+
+jobs:
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'push'
+    
+    outputs:
+      alb-dns: ${{ steps.terraform.outputs.alb_dns_name }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      working-directory: ./terraform/environments/staging
+      run: terraform init
+
+    - name: Terraform Plan
+      working-directory: ./terraform/environments/staging
+      run: terraform plan -var-file="terraform.tfvars" -out=tfplan
+
+    - name: Terraform Apply
+      working-directory: ./terraform/environments/staging
+      run: terraform apply -auto-approve tfplan
+
+    - name: Get Terraform Outputs
+      id: terraform
+      working-directory: ./terraform/environments/staging
+      run: |
+        echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> $GITHUB_OUTPUT
+
+  deploy-application:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Update ECS Service
+      run: |
+        aws ecs update-service \
+          --cluster ${{ env.ENVIRONMENT }}-cluster \
+          --service ${{ env.ENVIRONMENT }}-go-microservice-service \
+          --force-new-deployment \
+          --region ${{ env.AWS_REGION }}
+
+    - name: Wait for deployment to complete
+      run: |
+        aws ecs wait services-stable \
+          --cluster ${{ env.ENVIRONMENT }}-cluster \
+          --services ${{ env.ENVIRONMENT }}-go-microservice-service \
+          --region ${{ env.AWS_REGION }}
+
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-application]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run integration tests
+      working-directory: ./application
+      env:
+        API_BASE_URL: http://${{ needs.deploy-infrastructure.outputs.alb-dns }}
+      run: |
+        go test -v ./tests/integration/... -tags=integration
+
+    - name: Health check
+      run: |
+        for i in {1..30}; do
+          if curl -f http://${{ needs.deploy-infrastructure.outputs.alb-dns }}/health; then
+            echo "Health check passed"
+            exit 0
+          fi
+          echo "Health check failed, retrying in 10 seconds..."
+          sleep 10
+        done
+        echo "Health check failed after 5 minutes"
+        exit 1
+
+  notify-deployment:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, deploy-application, integration-tests]
+    if: always()
+    
+    steps:
+    - name: Notify Slack on Success
+      if: needs.deploy-application.result == 'success' && needs.integration-tests.result == 'success'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#deployments'
+        text: |
+          🚀 Staging deployment successful!
+          Environment: ${{ env.ENVIRONMENT }}
+          URL: http://${{ needs.deploy-infrastructure.outputs.alb-dns }}
+          Commit: ${{ github.sha }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: Notify Slack on Failure
+      if: needs.deploy-application.result == 'failure' || needs.integration-tests.result == 'failure'
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#deployments'
+        text: |
+          ❌ Staging deployment failed!
+          Environment: ${{ env.ENVIRONMENT }}
+          Commit: ${{ github.sha }}
+          Please check the logs for details.
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

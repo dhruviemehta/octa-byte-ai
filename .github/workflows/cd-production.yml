@@ -1,0 +1,245 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+      version:
+        description: 'Version/tag to deploy'
+        required: true
+        default: 'latest'
+
+env:
+  AWS_REGION: ap-south-1
+  ENVIRONMENT: production
+
+jobs:
+  manual-approval:
+    name: Manual Approval
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Request Approval
+      uses: trstringer/manual-approval@v1
+      with:
+        secret: ${{ github.TOKEN }}
+        approvers: devops-team,platform-team
+        minimum-approvals: 2
+        issue-title: "Production Deployment Approval Required"
+        issue-body: |
+          **Production Deployment Request**
+          
+          - **Version**: ${{ github.event.inputs.version }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Commit**: ${{ github.sha }}
+          - **Requested by**: ${{ github.actor }}
+          
+          Please review and approve this production deployment.
+
+  pre-deployment-checks:
+    name: Pre-deployment Checks
+    runs-on: ubuntu-latest
+    needs: manual-approval
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Verify staging deployment
+      run: |
+        echo "Verifying staging environment health..."
+        curl -f https://staging-alb-url/health || exit 1
+
+    - name: Check for critical alerts
+      run: |
+        echo "Checking for critical alerts in monitoring..."
+        # Add actual monitoring checks here
+
+    - name: Validate database migrations
+      run: |
+        echo "Validating database migrations..."
+        # Add migration validation logic
+
+  backup-database:
+    name: Backup Production Database
+    runs-on: ubuntu-latest
+    needs: pre-deployment-checks
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Create RDS Snapshot
+      run: |
+        SNAPSHOT_ID="production-backup-$(date +%Y%m%d%H%M%S)"
+        aws rds create-db-snapshot \
+          --db-instance-identifier production-postgres \
+          --db-snapshot-identifier $SNAPSHOT_ID \
+          --region ${{ env.AWS_REGION }}
+        
+        echo "Created snapshot: $SNAPSHOT_ID"
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-checks, backup-database]
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+
+    - name: Deploy Infrastructure
+      working-directory: ./terraform/environments/production
+      run: |
+        terraform init
+        terraform plan -var-file="terraform.tfvars"
+        terraform apply -auto-approve
+
+    - name: Blue/Green Deployment
+      run: |
+        echo "Starting blue/green deployment..."
+        
+        # Get current running tasks
+        CURRENT_TASKS=$(aws ecs list-tasks \
+          --cluster production-cluster \
+          --service production-go-microservice-service \
+          --query 'taskArns[0]' \
+          --output text)
+        
+        # Update service with new image
+        aws ecs update-service \
+          --cluster production-cluster \
+          --service production-go-microservice-service \
+          --force-new-deployment
+        
+        # Wait for new tasks to be running
+        aws ecs wait services-stable \
+          --cluster production-cluster \
+          --services production-go-microservice-service
+        
+        echo "Deployment completed successfully"
+
+  post-deployment-tests:
+    name: Post-deployment Tests
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Smoke Tests
+      run: |
+        echo "Running smoke tests..."
+        
+        # Health check
+        curl -f https://production-alb-url/health
+        
+        # API functionality test
+        curl -f https://production-alb-url/api/users
+        
+        # Database connectivity test
+        curl -f https://production-alb-url/ready
+
+    - name: Performance Tests
+      run: |
+        echo "Running performance tests..."
+        # Add performance testing logic here
+
+    - name: Monitor Error Rates
+      run: |
+        echo "Monitoring error rates for 5 minutes..."
+        sleep 300
+        # Check error rates and latency metrics
+
+  rollback-on-failure:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: post-deployment-tests
+    if: failure()
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Rollback Deployment
+      run: |
+        echo "Rolling back deployment..."
+        
+        # Get previous task definition
+        PREVIOUS_TASK_DEF=$(aws ecs describe-services \
+          --cluster production-cluster \
+          --services production-go-microservice-service \
+          --query 'services[0].taskDefinition' \
+          --output text)
+        
+        # Update service to previous version
+        aws ecs update-service \
+          --cluster production-cluster \
+          --service production-go-microservice-service \
+          --task-definition $PREVIOUS_TASK_DEF
+
+    - name: Notify Rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#critical-alerts'
+        text: |
+          🚨 PRODUCTION ROLLBACK EXECUTED 🚨
+          
+          Deployment failed and has been rolled back.
+          Immediate attention required!
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  notify-success:
+    name: Notify Successful Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy-production, post-deployment-tests]
+    if: success()
+    
+    steps:
+    - name: Notify Success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#deployments'
+        text: |
+          🎉 PRODUCTION DEPLOYMENT SUCCESSFUL! 🎉
+          
+          - **Version**: ${{ github.event.inputs.version }}
+          - **Environment**: Production
+          - **Deployed by**: ${{ github.actor }}
+          - **URL**: https://production-alb-url
+          
+          All systems green! 🟢
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

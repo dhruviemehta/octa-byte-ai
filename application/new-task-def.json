@@ -1,0 +1,40 @@
+{
+    "family": "staging-go-microservice",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512", 
+    "executionRoleArn": "arn:aws:iam::492066127660:role/staging-ecs-task-execution-role",
+    "containerDefinitions": [
+        {
+            "name": "go-microservice",
+            "image": "492066127660.dkr.ecr.ap-south-1.amazonaws.com/go-microservice:latest",
+            "essential": true,
+            "portMappings": [{"containerPort": 8080, "hostPort": 8080, "protocol": "tcp"}],
+            "environment": [
+                {"name": "DB_NAME", "value": "appdb"},
+                {"name": "PORT", "value": "8080"},
+                {"name": "DB_HOST", "value": "staging-postgres.cpdavifyfqsv.ap-south-1.rds.amazonaws.com"},
+                {"name": "DB_PORT", "value": "5432"},
+                {"name": "LOG_LEVEL", "value": "info"},
+                {"name": "DB_SSL_MODE", "value": "require"}
+            ],
+            "secrets": [
+                {"name": "DB_USER", "valueFrom": "arn:aws:secretsmanager:ap-south-1:492066127660:secret:staging-db-password-QLc081:username::"},
+                {"name": "DB_PASSWORD", "valueFrom": "arn:aws:secretsmanager:ap-south-1:492066127660:secret:staging-db-password-QLc081:password::"}
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/staging-go-microservice",
+                    "awslogs-region": "ap-south-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            },
+            "healthCheck": {
+                "command": ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"],
+                "interval": 30, "timeout": 5, "retries": 3, "startPeriod": 60
+            }
+        }
+    ]
+}
