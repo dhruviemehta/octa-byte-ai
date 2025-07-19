@@ -246,3 +246,25 @@ bash# Quick rollback to previous version
 
 Total Implementation Time: ~10 hours
 Technologies Used: Go, Terraform, AWS, GitHub Actions, Docker, PostgreSQL
+
+### 🧩 Challenges Faced & How I Solved Them
+
+1. Terraform State Management with Multiple Environments
+Issue: Avoiding state file conflicts while working with both staging and production environments.
+Fix: Implemented remote state storage using an S3 backend with DynamoDB for state locking. Used isolated workspaces (staging, production) and *.tfvars per environment for clean separation.
+
+2. GitHub Actions Workflow Timeout
+Issue: CI pipeline was taking too long due to Docker image builds and dependency scans.
+Fix: Split the workflow into parallel jobs and optimized Docker caching. Reduced unnecessary steps during PRs and reserved full scans for merge-to-main events.
+
+3. Application Container CrashLoop on ECS
+Issue: The Go app kept restarting due to misconfigured environment variables and unhandled panics.
+Fix: Added runtime validation for required env vars and implemented graceful error handling on init. Also added readiness and liveness probes to catch failures early.
+
+4. RDS Connectivity Failures
+Issue: ECS tasks couldn’t connect to RDS running in private subnets.
+Fix: Fixed security group rules, verified subnet routing, and attached the ECS tasks to the correct private subnets with NAT access for egress.
+
+5. Database Migrations in CI/CD
+Issue: Application deployment succeeded, but API endpoints failed due to missing DB schema.
+Fix: Integrated Go migration tool (golang-migrate) in the CI/CD pipeline. Added a dedicated step post-deploy to run schema migrations on RDS before health checks.
