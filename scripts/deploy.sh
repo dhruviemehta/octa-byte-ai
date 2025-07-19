@@ -17,7 +17,7 @@ export AWS_DEFAULT_REGION=ap-south-1
 
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ECR_REPOSITORY="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/go-microservice"
+ECR_REPOSITORY="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ENVIRONMENT-go-microservice"
 
 echo "📦 Building Docker image..."
 cd application
