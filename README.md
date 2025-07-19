@@ -184,14 +184,15 @@ bash# Quick rollback to previous version
 # Or specify version
 ./scripts/rollback.sh production v1.2.3
 🎯 Best Practices Implemented
-Infrastructure as Code
+
+### Infrastructure as Code
 
 ✅ Modular Terraform structure
 ✅ Environment-specific configurations
 ✅ Remote state management with locking
 ✅ Resource tagging and naming conventions
 
-Security
+### Security
 
 ✅ Least privilege IAM policies
 ✅ Encrypted storage and transmission
@@ -199,13 +200,13 @@ Security
 ✅ Secret management
 ✅ Container security scanning
 
-Observability
+### Observability
 
 ✅ Structured logging with correlation IDs
 ✅ Comprehensive metrics collection
 ✅ Proactive alerting
 
-Development Practices
+### Development Practices
 
 ✅ 12-factor app methodology
 ✅ Graceful shutdown handling
@@ -213,30 +214,30 @@ Development Practices
 ✅ Configuration via environment variables
 ✅ Comprehensive testing
 
-🤝 Contributing
-Development Workflow
+## 🤝 Contributing
+## Development Workflow
 
-Fork the repository
-Create feature branch (git checkout -b feature/amazing-feature)
-Commit changes (git commit -m 'Add amazing feature')
-Push to branch (git push origin feature/amazing-feature)
-Open Pull Request
+* Fork the repository
+* Create feature branch (git checkout -b feature/amazing-feature)
+* Commit changes (git commit -m 'Add amazing feature')
+* Push to branch (git push origin feature/amazing-feature)
+* Open Pull Request
 
-Code Standards
+## Code Standards
 
-Go code must pass go fmt and go vet
-Terraform code must pass terraform fmt
-All code must include tests
-Documentation must be updated
+* Go code must pass go fmt and go vet
+* Terraform code must pass terraform fmt
+* All code must include tests
+* Documentation must be updated
 
-📧 Support
-For questions or issues:
+## 📧 Support
+### For questions or issues:
 
-Create an issue in this repository
-Contact: dhruvimehta228@gmail.com
+* Create an issue in this repository
+* Contact: dhruvimehta228@gmail.com
 
 
-🏆 Assignment Completion Status
+### 🏆 Assignment Completion Status
 
 ✅ Part 1: Infrastructure Provisioning (Terraform)
 ✅ Part 2: Deployment Automation (CI/CD)
